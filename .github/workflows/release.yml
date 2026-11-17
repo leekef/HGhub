@@ -1,9 +1,27 @@
 name: Release
 
-# 仅推送版本 tag（如 v1.2.3）时构建所有平台，并统一发布到该 tag 的 Release。
+# 推送版本 tag（如 v1.2.3）时构建所有平台并发布；也支持手动运行（workflow_dispatch）按需选择平台。
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      windows:
+        description: "编译 Windows（安装包 + 便携版）"
+        type: boolean
+        default: true
+      android:
+        description: "编译 Android（APK）"
+        type: boolean
+        default: true
+      macos:
+        description: "编译 macOS（dmg，私有仓库按 10 倍消耗额度）"
+        type: boolean
+        default: false
+      version:
+        description: "手动运行时的版本号（打 tag 时忽略）"
+        type: string
+        default: "1.2.1"
 
 permissions:
   contents: read
@@ -19,6 +37,7 @@ jobs:
   # ================= Windows：NSIS 安装包 + 便携包 =================
   windows:
     name: Windows (setup + portable)
+    if: github.event_name != 'workflow_dispatch' || inputs.windows
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +46,11 @@ jobs:
         id: ver
         shell: bash
         run: |
-          V="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            V="${{ inputs.version }}"
+          fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           node -e "const fs=require('fs');for(const p of ['src-tauri/tauri.conf.json','package.json']){const j=JSON.parse(fs.readFileSync(p));j.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')}" "$V"
 
@@ -72,6 +95,7 @@ jobs:
   # ================= Android：按 ABI 分包 + 签名 =================
   android:
     name: Android (split per ABI)
+    if: github.event_name != 'workflow_dispatch' || inputs.android
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -80,7 +104,11 @@ jobs:
         id: ver
         shell: bash
         run: |
-          V="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            V="${{ inputs.version }}"
+          fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           node -e "const fs=require('fs');for(const p of ['src-tauri/tauri.conf.json','package.json']){const j=JSON.parse(fs.readFileSync(p));j.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')}" "$V"
 
@@ -134,11 +162,20 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          if [ -z "${KEYSTORE_BASE64:-}" ]; then
-            echo "::error::缺少 ANDROID_KEY_BASE64 secret，无法签名"; exit 1
-          fi
           KS="$RUNNER_TEMP/release.keystore"
-          echo "$KEYSTORE_BASE64" | base64 -d > "$KS"
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$KS"
+          else
+            echo "::warning::未配置 ANDROID_KEY_BASE64，使用本次运行临时生成的签名密钥"
+            KEY_ALIAS="hghub"
+            STORE_PASSWORD="$(openssl rand -hex 16)"
+            KEY_PASSWORD="$STORE_PASSWORD"
+            echo "::add-mask::$STORE_PASSWORD"
+            keytool -genkeypair -noprompt -storetype PKCS12 -keystore "$KS" \
+              -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$STORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+              -dname "CN=HGhub Local Build"
+          fi
           BT="$(ls "$ANDROID_SDK_ROOT/build-tools" | sort -V | tail -1)"
           APKSIGNER="$ANDROID_SDK_ROOT/build-tools/$BT/apksigner"
           mkdir -p artifacts
@@ -167,6 +204,7 @@ jobs:
   # ================= macOS：三种架构的 DMG + APP =================
   macos:
     name: macOS (${{ matrix.name }})
+    if: github.event_name != 'workflow_dispatch' || inputs.macos
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -189,7 +227,11 @@ jobs:
         id: ver
         shell: bash
         run: |
-          V="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            V="${{ inputs.version }}"
+          fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           node -e "const fs=require('fs');for(const p of ['src-tauri/tauri.conf.json','package.json']){const j=JSON.parse(fs.readFileSync(p));j.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')}" "$V"
 
@@ -239,6 +281,7 @@ jobs:
   # ================= iOS：未签名 IPA =================
   ios:
     name: iOS Build (IPA)
+    if: github.event_name != 'workflow_dispatch'
     runs-on: macos-latest
     env:
       APPLE_DEVELOPMENT_TEAM: "ABCDE12345"
@@ -249,7 +292,11 @@ jobs:
         id: ver
         shell: bash
         run: |
-          V="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            V="${{ inputs.version }}"
+          fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           node -e "const fs=require('fs');for(const p of ['src-tauri/tauri.conf.json','package.json']){const j=JSON.parse(fs.readFileSync(p));j.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')}" "$V"
 
@@ -309,6 +356,7 @@ jobs:
   # ================= Linux：DEB + AppImage =================
   linux:
     name: Linux (deb + appimage)
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -317,7 +365,11 @@ jobs:
         id: ver
         shell: bash
         run: |
-          V="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            V="${{ inputs.version }}"
+          fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           node -e "const fs=require('fs');for(const p of ['src-tauri/tauri.conf.json','package.json']){const j=JSON.parse(fs.readFileSync(p));j.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')}" "$V"
 
